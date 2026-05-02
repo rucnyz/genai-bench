@@ -31,6 +31,7 @@ class TextSampler(Sampler):
     input_modality = "text"
     supported_tasks = {
         "text-to-text",
+        "text-to-text-multi-turn",
         "text-to-embeddings",
         "text-to-rerank",
         "text-to-image",
@@ -71,7 +72,11 @@ class TextSampler(Sampler):
             UserRequest: A request object for the task.
         """
         # TODO: create Delegated Request Creator to replace if-else
-        if self.output_modality == "text":
+        if self.output_modality in ("text", "text-multi-turn"):
+            # text-multi-turn produces the same UserChatRequest as text;
+            # the multi-turn-ness is a per-user state-machine property
+            # of the user class (OpenAIUser.multi_turn_chat), not of the
+            # sampled request.
             return self._sample_chat_request(scenario)
         elif self.output_modality == "embeddings":
             return self._sample_embedding_request(scenario)
@@ -228,11 +233,11 @@ class TextSampler(Sampler):
         if scenario is None:
             raise ValueError("A scenario is required when using the default dataset.")
 
-        if self.output_modality == "text" and not isinstance(
+        if self.output_modality in ("text", "text-multi-turn") and not isinstance(
             scenario.scenario_type, TextDistribution
         ):
             raise ValueError(
-                f"Expected TextDistribution for text output, got "
+                f"Expected TextDistribution for {self.output_modality} output, got "
                 f"{type(scenario.scenario_type)}"
             )
         elif self.output_modality == "embeddings" and not isinstance(
