@@ -81,6 +81,7 @@ DEFAULT_SCENARIOS_FOR_IMAGE_GENERATION = [
 
 DEFAULT_SCENARIOS_BY_TASK = {
     "text-to-text": DEFAULT_SCENARIOS_FOR_CHAT,
+    "text-to-text-multi-turn": DEFAULT_SCENARIOS_FOR_CHAT,
     "text-to-rerank": DEFAULT_SCENARIOS_FOR_RERANK,
     "text-to-image": DEFAULT_SCENARIOS_FOR_IMAGE_GENERATION,
     "image-text-to-text": DEFAULT_SCENARIOS_FOR_VISION,
@@ -469,7 +470,7 @@ def validate_prefix_options(
     option_name = "--prefix-len" if prefix_len is not None else "--prefix-ratio"
 
     # Task compatibility
-    if task != "text-to-text":
+    if task not in ("text-to-text", "text-to-text-multi-turn"):
         raise click.UsageError(
             f"{option_name} is only supported for text-to-text tasks, not '{task}'."
         )

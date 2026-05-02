@@ -3,6 +3,7 @@
 from locust import task
 
 import json
+import os
 import random
 import time
 from typing import Any, Callable, Dict, Optional
@@ -31,6 +32,7 @@ class OpenAIUser(BaseUser):
     BACKEND_NAME = "openai"
     supported_tasks = {
         "text-to-text": "chat",
+        "text-to-text-multi-turn": "multi_turn_chat",
         "image-text-to-text": "chat",
         "text-to-embeddings": "embeddings",
         "text-to-rerank": "rerank",
@@ -56,6 +58,19 @@ class OpenAIUser(BaseUser):
             "Content-Type": "application/json",
         }
         self.api_backend = getattr(self, "api_backend", self.BACKEND_NAME)
+
+        # Multi-turn state — used only when the active task is
+        # multi_turn_chat. Each Locust user maintains its own conversation
+        # history; turns accumulate until the total token count exceeds
+        # the session cap, at which point the session resets (simulating
+        # a fresh long-horizon agent starting). The cap is configurable
+        # via env var GENAI_BENCH_MT_SESSION_CAP_TOKENS (default 60_000).
+        self._mt_history: list = []
+        self._mt_total_tokens: int = 0
+        self._mt_pending_user_msg = None
+        self._mt_session_cap = int(
+            os.environ.get("GENAI_BENCH_MT_SESSION_CAP_TOKENS", "60000")
+        )
         super().on_start()
 
     @task
@@ -148,6 +163,93 @@ class OpenAIUser(BaseUser):
         )
 
         return messages
+
+    @task
+    def multi_turn_chat(self):
+        """Multi-turn variant of `chat`: each Locust user maintains its
+        own conversation history across iterations. The next iteration's
+        request is built as `[system?, history..., new_user_msg]`, which
+        on a server with prefix-cache (e.g., SGLang's MambaRadixCache)
+        means the cumulative KV state is reused across turns and KV
+        usage grows monotonically with the session — the long-horizon
+        agent regime described in the Prelude paper (§motivation).
+
+        When `self._mt_total_tokens` exceeds the per-user session cap
+        (env `GENAI_BENCH_MT_SESSION_CAP_TOKENS`, default 60_000), the
+        history resets, simulating a new agent session beginning.
+
+        This task is non-multimodal; image-text-to-text multi-turn would
+        require additional handling for image content per turn and is
+        out of scope for the agent-serving regime this task targets.
+        """
+        endpoint = "/v1/chat/completions"
+        user_request = self.sample()
+
+        if not isinstance(user_request, UserChatRequest):
+            raise AttributeError(
+                f"user_request should be of type UserChatRequest for "
+                f"OpenAIUser.multi_turn_chat, got {type(user_request)}"
+            )
+        if isinstance(user_request, UserImageChatRequest):
+            raise AttributeError(
+                "multi_turn_chat does not support image-text-to-text; "
+                "use the single-turn 'image-text-to-text' task instead."
+            )
+
+        # Build messages array: optional system + accumulated history +
+        # new user message for this turn.
+        new_user_msg = user_request.prompt
+        messages: list = []
+        system_message = user_request.additional_request_params.get(
+            "system_message"
+        )
+        if system_message:
+            messages.append({"role": "system", "content": system_message})
+        messages.extend(self._mt_history)
+        messages.append({"role": "user", "content": new_user_msg})
+
+        # Filter out keys that shouldn't be spread into payload
+        filtered_params = {
+            k: v
+            for k, v in user_request.additional_request_params.items()
+            if k not in ["system_message", "messages", "temperature"]
+        }
+
+        payload = {
+            "model": user_request.model,
+            "messages": messages,
+            "max_tokens": user_request.max_tokens,
+            "temperature": user_request.additional_request_params.get(
+                "temperature", 0.0
+            ),
+            "stream": True,
+            "stream_options": {
+                "include_usage": True,
+            },
+            **filtered_params,
+        }
+        if self.api_backend in ["vllm", "sglang"]:
+            payload.setdefault("ignore_eos", bool(user_request.max_tokens))
+        else:
+            payload.pop("ignore_eos", None)
+
+        # Stash the user message; parse_chat_response will consume it
+        # on success. Wrap in try/finally so the sentinel is always
+        # cleared — including on HTTP errors where parse_chat_response
+        # is bypassed (send_request constructs a UserResponse directly
+        # for non-200 responses) and would otherwise leak into the next
+        # task iteration.
+        self._mt_pending_user_msg = new_user_msg
+        try:
+            self.send_request(
+                True,
+                endpoint,
+                payload,
+                self.parse_chat_response,
+                user_request.num_prefill_tokens,
+            )
+        finally:
+            self._mt_pending_user_msg = None
 
     @task
     def embeddings(self):
@@ -485,6 +587,29 @@ class OpenAIUser(BaseUser):
                 "🚨🚨🚨 Server did not report reasoning_tokens. Estimated "
                 "reasoning_tokens based on the model tokenizer.",
             )
+        # Multi-turn history append: if this response was for a
+        # multi_turn_chat task, append the (user, assistant) turn pair
+        # to the per-user history and reset the session if the cap
+        # has been exceeded. The pending-user-msg sentinel is set in
+        # multi_turn_chat() and consumed exactly once here.
+        if self._mt_pending_user_msg is not None:
+            self._mt_history.append(
+                {"role": "user", "content": self._mt_pending_user_msg}
+            )
+            self._mt_history.append(
+                {"role": "assistant", "content": generated_text}
+            )
+            # num_prefill_tokens is the cumulative prefilled context for
+            # this turn (full history + new user msg). tokens_received is
+            # this turn's decode output. Sum to track session growth.
+            self._mt_total_tokens = (num_prefill_tokens or 0) + (
+                tokens_received or 0
+            )
+            self._mt_pending_user_msg = None
+            if self._mt_total_tokens >= self._mt_session_cap:
+                self._mt_history = []
+                self._mt_total_tokens = 0
+
         return UserChatResponse(
             status_code=200,
             generated_text=generated_text,

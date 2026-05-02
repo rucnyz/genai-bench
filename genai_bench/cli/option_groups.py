@@ -43,6 +43,7 @@ def api_options(func):
         type=click.Choice(
             [
                 "text-to-text",
+                "text-to-text-multi-turn",
                 "text-to-image",
                 "text-to-embeddings",
                 "text-to-rerank",
@@ -56,8 +57,12 @@ def api_options(func):
         callback=validate_task,
         help="The task to benchmark: it follows `<input_modality>-to-"
         "<output_modality>` pattern. Currently we support "
-        "`text-to-text`, `text-to-image`, `text-to-embeddings`, "
-        "`text-to-rerank`, `image-text-to-text`, and `image-to-embeddings`.",
+        "`text-to-text`, `text-to-text-multi-turn`, `text-to-image`, "
+        "`text-to-embeddings`, `text-to-rerank`, `image-text-to-text`, "
+        "and `image-to-embeddings`. The multi-turn variant maintains a "
+        "per-user conversation history across iterations and resets "
+        "the session when accumulated tokens exceed "
+        "`GENAI_BENCH_MT_SESSION_CAP_TOKENS` (default 60000).",
     )(func)
     func = click.option(
         "--api-key",
