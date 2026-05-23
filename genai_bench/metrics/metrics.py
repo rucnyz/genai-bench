@@ -55,19 +55,32 @@ class RequestLevelMetrics(BaseModel):
     def validate_metrics(cls, values):
         """
         Ensure that metrics are validated only if error_code is None.
+
+        TPOT and the other OUTPUT_METRICS_FIELDS are skipped when the
+        request only produced one output token: there's no meaningful
+        per-output-token time when there's no second token to measure
+        against. Without this carve-out, every request in an
+        `output_tokens=1` (or `output_tokens=0`) benchmark is dropped
+        as an "invalid metrics record" and the run reports N/A across
+        the board.
         """
         if not isinstance(values, dict):
             return values
 
         error_code = values.get("error_code")
         if error_code is None:
-            # Validate all metric fields
+            num_output = values.get("num_output_tokens")
+            # TPOT-style metrics need at least 2 output tokens to be
+            # well-defined; skip OUTPUT_METRICS_FIELDS validation when
+            # the request didn't decode that many.
+            skip_output_metrics = (
+                isinstance(num_output, int) and num_output is not None and num_output <= 1
+            )
+            allow_none = {"error_code", "error_message"} | cls.AUDIO_METRICS_FIELDS
+            if skip_output_metrics:
+                allow_none = allow_none | cls.OUTPUT_METRICS_FIELDS
             for field_name, field_value in values.items():
-                if (
-                    field_name
-                    not in ({"error_code", "error_message"} | cls.AUDIO_METRICS_FIELDS)
-                    and field_value is None
-                ):
+                if field_name not in allow_none and field_value is None:
                     raise ValueError(
                         f"{field_name} must not be None if error_code is None."
                     )

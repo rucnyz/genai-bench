@@ -205,9 +205,21 @@ class AggregatedMetricsCollector:
                 if warmup_number <= i < len(self.all_request_metrics) - cooldown_number:
                     values.append(value)
 
-            # Validate that all values are valid for processing
+            # Validate that all values are valid for processing.
+            #
+            # AUDIO_METRICS_FIELDS are skipped because text runs never
+            # populate them. OUTPUT_METRICS_FIELDS (tpot, output_latency,
+            # output_inference_speed, ...) are skipped when ALL requests
+            # had num_output_tokens <= 1 — those metrics are undefined
+            # in that case (TPOT needs two tokens to subtract), so the
+            # per-request validator left them as None and there are no
+            # values to aggregate. Without this skip, an entire
+            # `output_tokens=1` benchmark run dies on aggregation.
             if not values:
-                if key in RequestLevelMetrics.AUDIO_METRICS_FIELDS:
+                if (
+                    key in RequestLevelMetrics.AUDIO_METRICS_FIELDS
+                    or key in RequestLevelMetrics.OUTPUT_METRICS_FIELDS
+                ):
                     continue
                 raise ValueError(
                     f"No values found for metric '{key}'. This should never happen!"

@@ -642,6 +642,14 @@ def create_single_request_metrics_sheet(
 
 
 def merge_cells(worksheet: Worksheet, start_row: int, end_row: int, column_index: int):
+    # Nothing to merge when the data range is empty or a single row.
+    # openpyxl rejects single-row / inverted ranges with
+    # `ValueError: <max> must be greater than <min>`. This shows up
+    # whenever a sheet has 0 or 1 data rows — for example on
+    # output_tokens=1 benchmarks where TPOT-derived sheets have
+    # nothing to populate.
+    if end_row <= start_row:
+        return
     start_cell = f"{get_column_letter(column_index)}{start_row}"
     end_cell = f"{get_column_letter(column_index)}{end_row}"
     value_to_keep = worksheet[start_cell].value
